@@ -1,6 +1,6 @@
 from __future__ import print_function
-from setuptools import Command
-from pythonforandroid import toolchain
+from setuptools.command.sdist import sdist
+#from pythonforandroid import toolchain
 
 import sys
 from os.path import realpath, join, exists, dirname, curdir, basename, split
@@ -16,12 +16,16 @@ def argv_contains(t):
     return False
 
 
-class BdistAPK(Command):
+class BdistAPK(sdist):
     description = 'Create an APK with python-for-android'
 
     user_options = []
 
     def initialize_options(self):
+
+
+        sdist.initialize_options(self)
+
         for option in self.user_options:
             setattr(self, option[0].strip('=').replace('-', '_'), None)
 
@@ -34,10 +38,24 @@ class BdistAPK(Command):
         for (option, (source, value)) in option_dict.items():
             setattr(self, option, str(value))
 
+    def add_defaults(self):
+        # Believe it or not, this actually has the opposite effect!
+        self.distribution.include_package_data = False
+        sdist.add_defaults(self)
 
     def finalize_options(self):
 
+        sdist.finalize_options(self)
+        self.keep_temp = True
         setup_options = self.distribution.get_option_dict('apk')
+        self.main_entry_point = self.search_entry_points()
+        if self.main_entry_point is not None:
+            requirements = getattr(self, 'requirements', '').split(',')
+            requirements.append(self.distribution.get_name())
+            self.requirements = ','.join([r for r in requirements if len(r)])
+            setup_options['requirements'] = ('setup script', self.requirements)
+
+
         for (option, (source, value)) in setup_options.items():
             if source == 'command line':
                 continue
@@ -70,8 +88,13 @@ class BdistAPK(Command):
             self.arch = arch
             sys.argv.append('--arch={}'.format(arch))
 
-    def run(self):
+        self.bdist_dir = 'build/bdist.android-{}'.format(self.arch)
+        if self.main_entry_point is not None:
+            script_path = join(self.bdist_dir, 'main.py')
+            self.main_entry_point['script_path'] = script_path
 
+    def run(self):
+        sdist.run(self)
         self.prepare_build_dir()
 
         from pythonforandroid.toolchain import main
@@ -79,34 +102,28 @@ class BdistAPK(Command):
         main()
 
     def prepare_build_dir(self):
+        bdist_dir = self.bdist_dir
+        if exists(bdist_dir):
+            rmtree(bdist_dir)
+        makedirs(bdist_dir)
 
         if argv_contains('--private'):
             print('WARNING: Received --private argument when this would '
                   'normally be generated automatically.')
             print('         This is probably bad unless you meant to do '
                   'that.')
+        if self.main_entry_point is not None:
+            self.build_entry_point()
+            self.build_sdist_recipe()
+            main_py_dir = dirname(self.main_entry_point['script_path'])
+        else:
+            main_py_dir = self.search_dirs()
 
-        bdist_dir = 'build/bdist.android-{}'.format(self.arch)
-        if exists(bdist_dir):
-            rmtree(bdist_dir)
-        makedirs(bdist_dir)
+        sys.argv.append('--private={}'.format(join(realpath(curdir), main_py_dir)))
 
-        globs = []
-        for directory, patterns in self.distribution.package_data.items():
-            for pattern in patterns:
-                globs.append(join(directory, pattern))
-
-        filens = []
-        for pattern in globs:
-            filens.extend(glob(pattern))
-
+    def search_dirs(self):
         main_py_dirs = []
-        for filen in filens:
-            new_dir = join(bdist_dir, dirname(filen))
-            if not exists(new_dir):
-                makedirs(new_dir)
-            print('Including {}'.format(filen))
-            copyfile(filen, join(bdist_dir, filen))
+        for filen in self.filelist.files:
             if basename(filen) in ('main.py', 'main.pyo'):
                 main_py_dirs.append(filen)
 
@@ -119,9 +136,82 @@ class BdistAPK(Command):
         if len(main_py_dirs) > 1:
             print('WARNING: Multiple main.py dirs found, using the shortest path')
         main_py_dirs = sorted(main_py_dirs, key=lambda j: len(split(j)))
+        return join(dirname(main_py_dirs[0]))
 
-        sys.argv.append('--private={}'.format(join(realpath(curdir), bdist_dir,
-                                                   dirname(main_py_dirs[0]))))
+    def search_entry_points(self):
+        package_names = [p for p in self.distribution.packages if '.' not in p]
+        if len(package_names) == 1:
+            self.top_level_package = package_names[0]
+        else:
+            self.top_level_package = None
+            return None
+        main_entry_point = None
+        for entry_points in self.distribution.entry_points.values():
+            for entry_point in entry_points:
+                script_name, package_ident = entry_point.split('=')
+                package_ident = package_ident.strip(' ')
+                modpath, func_name = package_ident.split(':')
+                if '.' not in package_ident:
+                    package_name = None
+                    if modpath == 'main':
+                        main_entry_point = {
+                            'modpath':modpath,
+                            'func_name':func_name,
+                        }
+                        break
+                else:
+                    package_name = package_ident.split('.')[0]
+                    if package_name != self.top_level_package:
+                        continue
+                    if modpath.split('.')[1] == 'main':
+                        main_entry_point = {
+                            'modpath':modpath,
+                            'func_name':func_name,
+                            'package_name':package_name,
+                        }
+                        break
+        return main_entry_point
+
+    def build_entry_point(self):
+        template = '\n'.join([
+            'from {modpath} import {func_name}',
+            '',
+            'if __name__ == "__main__":',
+            '    {func_name}()',
+            '',
+        ])
+        script_text = template.format(**self.main_entry_point)
+        script_path = self.main_entry_point['script_path']
+        with open(join(realpath(curdir), script_path), 'w') as f:
+            f.write(script_text)
+
+    def build_sdist_recipe(self):
+        requirements = ['python2', 'setuptools']
+        #requirements.extend(self.requirements.split(','))
+        requirements = ', '.join(['"{}"'.format(r) for r in requirements])
+        script_text = '\n'.join([
+            'from pythonforandroid.recipe import PythonRecipe, IncludedFilesBehaviour',
+            'class SdistRecipe(IncludedFilesBehaviour, PythonRecipe):',
+            '    site_packages_name = "{pkg_name}"',
+            '    src_filename = "{filename}"',
+            '    version = "{version}"',
+            '    depends = [{requirements}]',
+            '    call_hostpython_via_targetpython = False',
+            'recipe = SdistRecipe()',
+        ]).format(
+            filename=join(realpath(curdir), self.distribution.get_fullname()),
+            #filename=join(realpath(curdir), self.get_archive_files()[0]),
+            pkg_name=self.top_level_package,
+            version=self.distribution.get_version(),
+            requirements=requirements,
+        )
+        name = self.distribution.get_name()
+        recipe_dir = join(realpath(curdir), 'p4a-recipes', name)
+        #recipe_dir = join(realpath(curdir), self.bdist_dir, 'p4a-recipes', name)
+        if not exists(recipe_dir):
+            makedirs(recipe_dir)
+        with open(join(recipe_dir, '__init__.py'), 'w') as f:
+            f.write(script_text)
 
 
 def _set_user_options():
