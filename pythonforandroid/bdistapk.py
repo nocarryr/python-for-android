@@ -1,7 +1,8 @@
 from __future__ import print_function
 from setuptools.command.sdist import sdist
 #from pythonforandroid import toolchain
-
+import subprocess
+import shlex
 import sys
 from os.path import realpath, join, exists, dirname, curdir, basename, split
 from os import makedirs
@@ -186,7 +187,14 @@ class BdistAPK(sdist):
             f.write(script_text)
 
     def build_sdist_recipe(self):
+        recipes = subprocess.check_output(shlex.split('p4a recipes --compact'))
+        recipes = [r.rstrip('\n') for r in recipes.split(' ')]
+
         requirements = ['python2', 'setuptools']
+        for req in self.requirements.split(','):
+            req = req.strip(' ')
+            if req in recipes:
+                requirements.append(req)
         #requirements.extend(self.requirements.split(','))
         requirements = ', '.join(['"{}"'.format(r) for r in requirements])
         script_text = '\n'.join([
