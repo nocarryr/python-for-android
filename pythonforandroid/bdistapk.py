@@ -153,11 +153,12 @@ class BdistAPK(sdist):
                 package_ident = package_ident.strip(' ')
                 modpath, func_name = package_ident.split(':')
                 if '.' not in package_ident:
-                    package_name = None
                     if modpath == 'main':
+                        package_name = self.top_level_package
                         main_entry_point = {
                             'modpath':modpath,
                             'func_name':func_name,
+                            'package_name':package_name,
                         }
                         break
                 else:
