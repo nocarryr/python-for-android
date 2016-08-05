@@ -3,10 +3,12 @@ from setuptools.command.sdist import sdist
 #from pythonforandroid import toolchain
 import subprocess
 import shlex
+from zipfile import ZipFile
 import sys
 from os.path import realpath, join, exists, dirname, curdir, basename, split
-from os import makedirs
+from os import makedirs, walk, pathsep, extsep
 from glob import glob
+from fnmatch import fnmatch
 from shutil import rmtree, copyfile
 
 
@@ -115,6 +117,7 @@ class BdistAPK(sdist):
                   'that.')
         if self.main_entry_point is not None:
             self.build_entry_point()
+            #self.build_zip_package()
             self.build_sdist_recipe()
             main_py_dir = dirname(self.main_entry_point['script_path'])
         else:
@@ -221,6 +224,34 @@ class BdistAPK(sdist):
             makedirs(recipe_dir)
         with open(join(recipe_dir, '__init__.py'), 'w') as f:
             f.write(script_text)
+
+    def build_zip_package(self):
+        pkg_dir = join(self.distribution.get_fullname(), self.top_level_package)
+        zip_filename = join(
+            realpath(curdir),
+            self.bdist_dir,
+            extsep.join([self.top_level_package, 'zip']),
+        )
+        pkg_prefix = ''.join([self.distribution.get_fullname(), pathsep])
+        data_files = []
+        with ZipFile(zip_filename, 'w') as zf:
+            for root, dirs, files in walk(pkg_dir):
+                for fn in files:
+                    fn = join(root, fn)
+                    arch_fn = fn.lstrip(pkg_prefix)
+                    if not fnmatch(fn, '*.py') and not fnmatch(fn, '*.py[co]'):
+                        data_files.append([fn, arch_fn])
+                        continue
+                    zf.write(fn, arch_fn)
+        for fn, arch_fn in data_files:
+            arch_fn = arch_fn.lstrip('/')
+            print(arch_fn)
+            dist_fn = join(realpath(curdir), self.bdist_dir, arch_fn)
+            print('arch_fn={}, dist_fn={}'.format(arch_fn, dist_fn))
+            if not exists(dirname(dist_fn)):
+                makedirs(dirname(dist_fn))
+            copyfile(fn, dist_fn)
+        print(self.distribution.package_data)
 
 
 def _set_user_options():
