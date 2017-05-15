@@ -33,7 +33,6 @@ class Context(object):
     libs_dir = None  # where Android libs are cached after build but
                      # before being placed in dists
     aars_dir = None
-    javaclass_dir = None
 
     ccache = None  # whether to use ccache
     cython = None  # the cython interpreter name
@@ -45,6 +44,8 @@ class Context(object):
     bootstrap_build_dir = None
 
     recipe_build_order = None  # Will hold the list of all built recipes
+
+    symlink_java_src = False # If True, will symlink instead of copying during build
 
     @property
     def packages_path(self):
@@ -186,6 +187,8 @@ class Context(object):
             #                # for debug tests of p4a
             possible_dirs = glob.glob(expanduser(join(
                 '~', '.buildozer', 'android', 'platform', 'android-sdk-*')))
+            possible_dirs = [d for d in possible_dirs if not
+                             (d.endswith('.bz2') or d.endswith('.gz'))]
             if possible_dirs:
                 info('Found possible SDK dirs in buildozer dir: {}'.format(
                     ', '.join([d.split(os.sep)[-1] for d in possible_dirs])))
@@ -527,6 +530,7 @@ def build_recipes(build_order, python_modules, ctx):
     bs = ctx.bootstrap
     info_notify("Recipe build order is {}".format(build_order))
     if python_modules:
+        python_modules = sorted(set(python_modules))
         info_notify(
             ('The requirements ({}) were not found as recipes, they will be '
              'installed with pip.').format(', '.join(python_modules)))
@@ -584,7 +588,7 @@ def build_recipes(build_order, python_modules, ctx):
 
 
 def run_pymodules_install(ctx, modules):
-    modules = filter(ctx.not_has_package, modules)
+    modules = list(filter(ctx.not_has_package, modules))
 
     if not modules:
         info('There are no Python modules to install, skipping')

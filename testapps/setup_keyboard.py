@@ -5,9 +5,10 @@ from setuptools import find_packages
 options = {'apk': {'debug': None,
                    'requirements': 'sdl2,pyjnius,kivy,python2',
                    'android-api': 19,
-                   'ndk-dir': '/home/asandy/android/crystax-ndk-10.3.1',
+                   'ndk-dir': '/home/asandy/android/crystax-ndk-10.3.2',
                    'dist-name': 'bdisttest',
-                   'ndk-version': '10.3.1',
+                   'ndk-version': '10.3.2',
+                   'permission': 'VIBRATE',
                    }}
 
 package_data = {'': ['*.py',
@@ -18,12 +19,12 @@ packages = find_packages()
 print('packages are', packages)
 
 setup(
-    name='testapp_setup',
+    name='testapp_keyboard',
     version='1.1',
     description='p4a setup.py test',
     author='Alexander Taylor',
     author_email='alexanderjohntaylor@gmail.com',
     packages=find_packages(),
     options=options,
-    package_data={'testapp': ['*.py', '*.png']}
+    package_data={'setup_keyboard': ['*.py', '*.png']}
 )

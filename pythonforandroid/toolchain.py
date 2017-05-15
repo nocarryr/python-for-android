@@ -8,7 +8,6 @@ This module defines the entry point for command line and programmatic use.
 
 from __future__ import print_function
 
-
 def check_python_dependencies():
     # Check if the Python requirements are installed. This appears
     # before the imports because otherwise they're imported elsewhere.
@@ -35,12 +34,13 @@ def check_python_dependencies():
             import_module(module)
         except ImportError:
             if version is None:
-                print('ERROR: The {} module could not be found, please '
+                print('ERROR: The {} Python module could not be found, please '
                       'install it.'.format(module))
                 ok = False
             else:
-                print('ERROR: The {} module could not be found, please install '
-                      'version {} or higher'.format(module, version))
+                print('ERROR: The {} Python module could not be found, '
+                      'please install version {} or higher'.format(
+                          module, version))
                 ok = False
         else:
             if version is None:
@@ -75,7 +75,9 @@ from functools import wraps
 
 import argparse
 import sh
+import imp
 from appdirs import user_data_dir
+import logging
 
 from pythonforandroid.recipe import (Recipe, PythonRecipe, CythonRecipe,
                                      CompiledComponentsPythonRecipe,
@@ -255,6 +257,14 @@ class ToolchainCL(object):
             '--ndk-version', '--ndk_version', dest='ndk_version', default='',
             help=('The version of the Android NDK. This is optional, '
                   'we try to work it out automatically from the ndk_dir.'))
+        generic_parser.add_argument(
+            '--symlink-java-src', '--symlink_java_src',
+            action='store_true',
+            dest='symlink_java_src',
+            default=False,
+            help=('If True, symlinks the java src folder during build and dist '
+                  'creation. This is useful for development only, it could also '
+                  'cause weird problems.'))
 
         default_storage_dir = user_data_dir('python-for-android')
         if ' ' in default_storage_dir:
@@ -283,10 +293,15 @@ class ToolchainCL(object):
             help=('Dependencies of your app, should be recipe names or '
                   'Python modules'),
             default='')
-        
+
         generic_parser.add_argument(
             '--bootstrap',
             help='The bootstrap to build with. Leave unset to choose automatically.',
+            default=None)
+
+        generic_parser.add_argument(
+            '--hook',
+            help='Filename to a module that contain python-for-android hooks',
             default=None)
 
         add_boolean_option(
@@ -315,6 +330,8 @@ class ToolchainCL(object):
             default=False,
             description='Copy libraries instead of using biglink (Android 4.3+)')
 
+        self._read_configuration()
+
         subparsers = parser.add_subparsers(dest='subparser_name',
                                            help='The command to run')
 
@@ -335,36 +352,59 @@ class ToolchainCL(object):
                 "--compact", action="store_true", default=False,
                 help="Produce a compact list suitable for scripting")
 
-        parser_bootstraps = add_parser(subparsers,
-            'bootstraps', help='List the available bootstraps',
+        parser_bootstraps = add_parser(
+            subparsers, 'bootstraps',
+            help='List the available bootstraps',
             parents=[generic_parser])
-        parser_clean_all = add_parser(subparsers,
-            'clean_all', aliases=['clean-all'],
+        parser_clean_all = add_parser(
+            subparsers, 'clean_all',
+            aliases=['clean-all'],
             help='Delete all builds, dists and caches',
             parents=[generic_parser])
-        parser_clean_dists = add_parser(subparsers,
+        parser_clean_dists = add_parser(
+            subparsers,
             'clean_dists', aliases=['clean-dists'],
             help='Delete all dists',
             parents=[generic_parser])
-        parser_clean_bootstrap_builds = add_parser(subparsers,
+        parser_clean_bootstrap_builds = add_parser(
+            subparsers,
             'clean_bootstrap_builds', aliases=['clean-bootstrap-builds'],
             help='Delete all bootstrap builds',
             parents=[generic_parser])
-        parser_clean_builds = add_parser(subparsers,
+        parser_clean_builds = add_parser(
+            subparsers,
             'clean_builds', aliases=['clean-builds'],
             help='Delete all builds',
             parents=[generic_parser])
 
+        parser_clean = add_parser(subparsers, 'clean',
+                                  help='Delete build components.',
+                                  parents=[generic_parser])
+        parser_clean.add_argument(
+            'component', nargs='+',
+            help=('The build component(s) to delete. You can pass any '
+                  'number of arguments from "all", "builds", "dists", '
+                  '"distributions", "bootstrap_builds", "downloads".'))
+
         parser_clean_recipe_build = add_parser(subparsers,
             'clean_recipe_build', aliases=['clean-recipe-build'],
-            help='Delete the build info for the given recipe',
+            help=('Delete the build components of the given recipe. '
+                  'By default this will also delete built dists'),
             parents=[generic_parser])
         parser_clean_recipe_build.add_argument('recipe', help='The recipe name')
+        parser_clean_recipe_build.add_argument('--no-clean-dists', default=False,
+                                               dest='no_clean_dists',
+                                               action='store_true',
+                                               help='If passed, do not delete existing dists')
 
-        parser_clear_download_cache= add_parser(subparsers,
-            'clear_download_cache', aliases=['clear-download-cache'],
-            help='Delete any cached recipe downloads',
+        parser_clean_download_cache= add_parser(subparsers,
+            'clean_download_cache', aliases=['clean-download-cache'],
+            help='Delete cached downloads for requirement builds',
             parents=[generic_parser])
+        parser_clean_download_cache.add_argument(
+            'recipes', nargs='*',
+            help=('The recipes to clean (space-separated). If no recipe name is '
+                  'provided, the entire cache is cleared.'))
 
         parser_export_dist = add_parser(subparsers,
             'export_dist', aliases=['export-dist'],
@@ -429,6 +469,9 @@ class ToolchainCL(object):
 
         setup_color(args.color)
 
+        if args.debug:
+            logger.setLevel(logging.DEBUG)
+
         # strip version from requirements, and put them in environ
         if hasattr(args, 'requirements'):
             requirements = []
@@ -448,6 +491,7 @@ class ToolchainCL(object):
         self.ndk_dir = args.ndk_dir
         self.android_api = args.android_api
         self.ndk_version = args.ndk_version
+        self.ctx.symlink_java_src = args.symlink_java_src
 
         self._archs = split_argument_list(args.arch)
 
@@ -462,6 +506,18 @@ class ToolchainCL(object):
 
         # Each subparser corresponds to a method
         getattr(self, args.subparser_name.replace('-', '_'))(args)
+
+    def hook(self, name):
+        if not self.args.hook:
+            return
+        if not hasattr(self, "hook_module"):
+            # first time, try to load the hook module
+            self.hook_module = imp.load_source("pythonforandroid.hook", self.args.hook)
+        if hasattr(self.hook_module, name):
+            info("Hook: execute {}".format(name))
+            getattr(self.hook_module, name)(self)
+        else:
+            info("Hook: ignore {}".format(name))
 
     @property
     def default_storage_dir(self):
@@ -489,7 +545,10 @@ class ToolchainCL(object):
             print(" ".join(set(Recipe.list_recipes(ctx))))
         else:
             for name in sorted(Recipe.list_recipes(ctx)):
-                recipe = Recipe.get_recipe(name, ctx)
+                try:
+                    recipe = Recipe.get_recipe(name, ctx)
+                except IOError:
+                    warning('Recipe "{}" could not be loaded'.format(name))
                 version = str(recipe.version)
                 print('{Fore.BLUE}{Style.BRIGHT}{recipe.name:<12} '
                       '{Style.RESET_ALL}{Fore.LIGHTBLUE_EX}'
@@ -516,6 +575,24 @@ class ToolchainCL(object):
             print('    {Fore.GREEN}depends: {bs.recipe_depends}{Fore.RESET}'
                   .format(bs=bs, Fore=Out_Fore))
 
+    def clean(self, args):
+        components = args.component
+
+        component_clean_methods = {'all': self.clean_all,
+                                   'dists': self.clean_dists,
+                                   'distributions': self.clean_dists,
+                                   'builds': self.clean_builds,
+                                   'bootstrap_builds': self.clean_bootstrap_builds,
+                                   'downloads': self.clean_download_cache}
+
+        for component in components:
+            if component not in component_clean_methods:
+                raise ValueError((
+                    'Asked to clean "{}" but this argument is not '
+                    'recognised'.format(component)))
+            component_clean_methods[component](args)
+            
+
     def clean_all(self, args):
         '''Delete all build components; the package cache, package builds,
         bootstrap builds and distributions.'''
@@ -532,11 +609,13 @@ class ToolchainCL(object):
 
     def clean_bootstrap_builds(self, args):
         '''Delete all the bootstrap builds.'''
-        for bs in Bootstrap.list_bootstraps():
-            bs = Bootstrap.get_bootstrap(bs, self.ctx)
-            if bs.build_dir and exists(bs.build_dir):
-                info('Cleaning build for {} bootstrap.'.format(bs.name))
-                shutil.rmtree(bs.build_dir)
+        if exists(join(self.ctx.build_dir, 'bootstrap_builds')):
+            shutil.rmtree(join(self.ctx.build_dir, 'bootstrap_builds'))
+        # for bs in Bootstrap.list_bootstraps():
+        #     bs = Bootstrap.get_bootstrap(bs, self.ctx)
+        #     if bs.build_dir and exists(bs.build_dir):
+        #         info('Cleaning build for {} bootstrap.'.format(bs.name))
+        #         shutil.rmtree(bs.build_dir)
 
     def clean_builds(self, args):
         '''Delete all build caches for each recipe, python-install, java code
@@ -569,16 +648,33 @@ class ToolchainCL(object):
         recipe = Recipe.get_recipe(args.recipe, self.ctx)
         info('Cleaning build for {} recipe.'.format(recipe.name))
         recipe.clean_build()
+        if not args.no_clean_dists:
+            self.clean_dists(args)
 
     def clean_download_cache(self, args):
         '''
-        Deletes any downloaded recipe packages.
+        Deletes a download cache for recipes stated as arguments. If no
+        argument is passed, it'll delete *all* downloaded cache. ::
+
+            p4a clean_download_cache kivy,pyjnius
 
         This does *not* delete the build caches or final distributions.
         '''
         ctx = self.ctx
-        if exists(ctx.packages_path):
-            shutil.rmtree(ctx.packages_path)
+        if hasattr(args, 'recipes') and args.recipes:
+            for package in args.recipes:
+                remove_path = join(ctx.packages_path, package)
+                if exists(remove_path):
+                    shutil.rmtree(remove_path)
+                    info('Download cache removed for: "{}"'.format(package))
+                else:
+                    warning('No download cache found for "{}", skipping'.format(package))
+        else:
+            if exists(ctx.packages_path):
+                shutil.rmtree(ctx.packages_path)
+                info('Download cache removed.')
+            else:
+                print('No cache found at "{}"'.format(ctx.packages_path))
 
     @require_prebuilt_dist
     def export_dist(self, args):
@@ -644,8 +740,20 @@ class ToolchainCL(object):
 
         build = imp.load_source('build', join(dist.dist_dir, 'build.py'))
         with current_directory(dist.dist_dir):
+            self.hook("before_apk_build")
             build_args = build.parse_args(args.unknown_args)
-            output = shprint(sh.ant, args.build_mode, _tail=20, _critical=True, _env=env)
+            self.hook("after_apk_build")
+            self.hook("before_apk_assemble")
+
+            try:
+                ant = sh.Command('ant')
+            except sh.CommandNotFound:
+                error('Could not find ant binary, please install it and make '
+                      'sure it is in your $PATH.')
+                exit(1)
+
+            output = shprint(ant, args.build_mode, _tail=20, _critical=True, _env=env)
+            self.hook("after_apk_assemble")
 
         info_main('# Copying APK to current directory')
 
@@ -659,7 +767,10 @@ class ToolchainCL(object):
 
         if not apk_file:
             info_main('# APK filename not found in build output, trying to guess')
-            apks = glob.glob(join(dist.dist_dir, 'bin', '*-*-{}.apk'.format(args.build_mode)))
+            suffix = args.build_mode
+            if suffix == 'release' and not args.keystore:
+                suffix = suffix + '-unsigned'
+            apks = glob.glob(join(dist.dist_dir, 'bin', '*-*-{}.apk'.format(suffix)))
             if len(apks) == 0:
                 raise ValueError('Couldn\'t find the built APK')
             if len(apks) > 1:
@@ -757,21 +868,23 @@ class ToolchainCL(object):
         for line in output:
             sys.stdout.write(line)
             sys.stdout.flush()
-        
+
 
     def build_status(self, args):
-
         print('{Style.BRIGHT}Bootstraps whose core components are probably '
               'already built:{Style.RESET_ALL}'.format(Style=Out_Style))
-        for filen in os.listdir(join(self.ctx.build_dir, 'bootstrap_builds')):
-            print('    {Fore.GREEN}{Style.BRIGHT}{filen}{Style.RESET_ALL}'
-                  .format(filen=filen, Fore=Out_Fore, Style=Out_Style))
+
+        bootstrap_dir = join(self.ctx.build_dir, 'bootstrap_builds')
+        if exists(bootstrap_dir):
+            for filen in os.listdir(bootstrap_dir):
+                print('    {Fore.GREEN}{Style.BRIGHT}{filen}{Style.RESET_ALL}'
+                      .format(filen=filen, Fore=Out_Fore, Style=Out_Style))
 
         print('{Style.BRIGHT}Recipes that are probably already built:'
               '{Style.RESET_ALL}'.format(Style=Out_Style))
-        if exists(join(self.ctx.build_dir, 'other_builds')):
-            for filen in sorted(
-                    os.listdir(join(self.ctx.build_dir, 'other_builds'))):
+        other_builds_dir = join(self.ctx.build_dir, 'other_builds')
+        if exists(other_builds_dir):
+            for filen in sorted(os.listdir(other_builds_dir)):
                 name = filen.split('-')[0]
                 dependencies = filen.split('-')[1:]
                 recipe_str = ('    {Style.BRIGHT}{Fore.GREEN}{name}'
