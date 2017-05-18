@@ -61,7 +61,11 @@ class BdistAPK(sdist):
             if source == 'command line':
                 continue
             if not argv_contains('--' + option):
-                if value in (None, 'None'):
+                # allow 'permissions': ['permission', 'permission] in apk
+                if option == 'permissions':
+                    for perm in value:
+                        sys.argv.append('--permission={}'.format(perm))
+                elif value in (None, 'None'):
                     sys.argv.append('--{}'.format(option))
                 else:
                     sys.argv.append('--{}={}'.format(option, value))
@@ -70,7 +74,7 @@ class BdistAPK(sdist):
         # provide them
         if not argv_contains('--name'):
             name = self.distribution.get_name()
-            sys.argv.append('--name={}'.format(name))
+            sys.argv.append('--name="{}"'.format(name))
             self.name = name
 
         if not argv_contains('--package'):
@@ -108,12 +112,15 @@ class BdistAPK(sdist):
             rmtree(bdist_dir)
         makedirs(bdist_dir)
 
-        if argv_contains('--private'):
+        if argv_contains('--private') and not argv_contains('--launcher'):
             print('WARNING: Received --private argument when this would '
                   'normally be generated automatically.')
             print('         This is probably bad unless you meant to do '
                   'that.')
-        if self.main_entry_point is not None:
+        
+        if argv_contains('--launcher'):
+            return
+        elif self.main_entry_point is not None:
             self.build_entry_point()
             self.build_sdist_recipe()
             main_py_dir = dirname(self.main_entry_point['script_path'])
