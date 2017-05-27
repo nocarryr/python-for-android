@@ -117,46 +117,33 @@ class BdistAPK(sdist):
                   'normally be generated automatically.')
             print('         This is probably bad unless you meant to do '
                   'that.')
+        
+        if argv_contains('--launcher'):
+            return
+        elif self.main_entry_point is not None:
+            self.build_entry_point()
+            self.build_sdist_recipe()
+            main_py_dir = dirname(self.main_entry_point['script_path'])
+        else:
+            main_py_dir = self.search_dirs()
 
-        bdist_dir = 'build/bdist.android-{}'.format(self.arch)
-        if exists(bdist_dir):
-            rmtree(bdist_dir)
-        makedirs(bdist_dir)
+        sys.argv.append('--private={}'.format(join(realpath(curdir), main_py_dir)))
 
-        globs = []
-        for directory, patterns in self.distribution.package_data.items():
-            for pattern in patterns:
-                globs.append(join(directory, pattern))
-
-        filens = []
-        for pattern in globs:
-            filens.extend(glob(pattern))
-
+    def search_dirs(self):
         main_py_dirs = []
-        if not argv_contains('--launcher'):
-            for filen in self.filelist.files:
-                new_dir = join(bdist_dir, dirname(filen))
-                if not exists(new_dir):
-                    makedirs(new_dir)
-                print('Including {}'.format(filen))
-                copyfile(filen, join(bdist_dir, filen))
-                if basename(filen) in ('main.py', 'main.pyo'):
-                    main_py_dirs.append(filen)
+        for filen in self.filelist.files:
+            if basename(filen) in ('main.py', 'main.pyo'):
+                main_py_dirs.append(filen)
 
         # This feels ridiculous, but how else to define the main.py dir?
         # Maybe should just fail?
-        if not main_py_dirs and not argv_contains('--launcher'):
+        if len(main_py_dirs) == 0:
             print('ERROR: Could not find main.py, so no app build dir defined')
             print('You should name your app entry point main.py')
             exit(1)
         if len(main_py_dirs) > 1:
             print('WARNING: Multiple main.py dirs found, using the shortest path')
         main_py_dirs = sorted(main_py_dirs, key=lambda j: len(split(j)))
-
-        if not argv_contains('--launcher'):
-            sys.argv.append('--private={}'.format(
-                join(realpath(curdir), bdist_dir, dirname(main_py_dirs[0])))
-            )
         return join(dirname(main_py_dirs[0]))
 
     def search_entry_points(self):
